@@ -54,7 +54,15 @@
       gap:10px;
       flex-wrap:wrap;
       margin-bottom:10px;
+      align-items:center;
     }
+
+    /* search wrapper so suggestions can be positioned */
+    .search-wrap {
+      position:relative;
+      display:inline-block;
+    }
+
     input[type="text"] {
       padding:10px 12px;
       width:260px;
@@ -63,6 +71,34 @@
       font-size:15px;
       outline:none;
     }
+
+    /* suggestions dropdown */
+    #suggestions {
+      position:absolute;
+      top:46px;
+      left:0;
+      width:260px;
+      background: rgba(0,0,0,0.6);
+      border-radius:8px;
+      max-height:260px;
+      overflow:auto;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.45);
+      z-index:80;
+      display:none;
+    }
+    .suggestion-item {
+      padding:8px 10px;
+      color:#fff;
+      cursor:pointer;
+      text-align:left;
+      font-size:14px;
+      border-bottom:1px solid rgba(255,255,255,0.03);
+    }
+    .suggestion-item:last-child { border-bottom: none; }
+    .suggestion-item:hover, .suggestion-item.active {
+      background: rgba(255,255,255,0.06);
+    }
+
     button, select {
       padding:10px 14px;
       border-radius:8px;
@@ -152,6 +188,7 @@
       .weather-container { flex-direction:column; align-items:center; text-align:center; }
       .current-weather, .extra-info { width:100%; }
       .big-temp { font-size:48px; }
+      #suggestions { left: 50%; transform: translateX(-50%); top:56px; }
     }
   </style>
 </head>
@@ -162,7 +199,10 @@
   </header>
 
   <div class="controls">
-    <input id="city" placeholder="e.g., Manila" onkeypress="handleKeyPress(event)">
+    <div class="search-wrap">
+      <input id="city" placeholder="e.g., Manila" onkeypress="handleKeyPress(event)" autocomplete="off">
+      <div id="suggestions" role="listbox" aria-label="Search suggestions"></div>
+    </div>
     <button class="primary" onclick="getWeather()">Get Weather</button>
     <button class="location" onclick="getLocationWeather()">Use My Location</button>
     <button class="ghost" onclick="clearWeather()">Clear</button>
@@ -568,7 +608,14 @@ function clearWeather() {
 }
 
 function handleKeyPress(e){
-  if (e.key === 'Enter') getWeather();
+  if (e.key === 'Enter') {
+    // If suggestions open and one is active, choose it
+    if (suggestionsVisible && suggestionIndex >= 0) {
+      chooseSuggestionByIndex(suggestionIndex);
+    } else {
+      getWeather();
+    }
+  }
 }
 
 /* Set background gradient based on weather + day/night
@@ -792,6 +839,186 @@ async function fetchForecast(lat, lon) {
     document.getElementById('forecast').innerHTML = '<p class="error">Error loading forecast.</p>';
   }
 }
+
+/* =========================
+   Search prediction logic
+   ========================= */
+
+const cityInput = document.getElementById('city');
+const suggestionsBox = document.getElementById('suggestions');
+
+let suggestionIndex = -1;
+let suggestionsVisible = false;
+let suggestionsCache = new Map();
+let fetchController = null;
+
+/* debounce helper */
+function debounce(fn, wait) {
+  let t = null;
+  return function(...args){
+    clearTimeout(t);
+    t = setTimeout(()=> fn.apply(this, args), wait);
+  };
+}
+
+/* display suggestions */
+function showSuggestions(items) {
+  suggestionsBox.innerHTML = '';
+  if (!items || items.length === 0) {
+    suggestionsBox.style.display = 'none';
+    suggestionsVisible = false;
+    return;
+  }
+  items.forEach((it, idx) => {
+    const div = document.createElement('div');
+    div.className = 'suggestion-item';
+    div.setAttribute('role','option');
+    div.dataset.index = idx;
+    div.dataset.lat = it.lat;
+    div.dataset.lon = it.lon;
+    div.innerHTML = `<strong>${it.name}</strong>${it.state ? ', '+it.state : ''}, ${it.country}`;
+    // use mousedown to prevent losing focus before click
+    div.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      chooseSuggestionByIndex(idx);
+    });
+    suggestionsBox.appendChild(div);
+  });
+  suggestionIndex = -1;
+  highlightSuggestion(suggestionIndex);
+  suggestionsBox.style.display = 'block';
+  suggestionsVisible = true;
+}
+
+/* highlight active suggestion */
+function highlightSuggestion(index) {
+  const children = suggestionsBox.querySelectorAll('.suggestion-item');
+  children.forEach((c, i) => {
+    if (i === index) c.classList.add('active');
+    else c.classList.remove('active');
+  });
+}
+
+/* choose suggestion by index */
+function chooseSuggestionByIndex(index) {
+  const children = suggestionsBox.querySelectorAll('.suggestion-item');
+  if (index < 0 || index >= children.length) return;
+  const el = children[index];
+  const lat = el.dataset.lat;
+  const lon = el.dataset.lon;
+  const text = el.textContent.trim();
+  // set input and hide suggestions
+  cityInput.value = text;
+  hideSuggestions();
+  // fetch weather by coords (precise)
+  fetchWeather(`https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&appid=${OPENWEATHER_KEY}&units=metric`);
+}
+
+/* hide suggestions */
+function hideSuggestions() {
+  suggestionsBox.style.display = 'none';
+  suggestionsVisible = false;
+  suggestionIndex = -1;
+  suggestionsBox.innerHTML = '';
+}
+
+/* keyboard navigation on input */
+cityInput.addEventListener('keydown', (e) => {
+  if (!suggestionsVisible) return;
+  const children = suggestionsBox.querySelectorAll('.suggestion-item');
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    suggestionIndex = Math.min(children.length - 1, suggestionIndex + 1);
+    highlightSuggestion(suggestionIndex);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    suggestionIndex = Math.max(0, suggestionIndex - 1);
+    highlightSuggestion(suggestionIndex);
+  } else if (e.key === 'Enter') {
+    if (suggestionIndex >= 0) {
+      e.preventDefault();
+      chooseSuggestionByIndex(suggestionIndex);
+    }
+  } else if (e.key === 'Escape') {
+    hideSuggestions();
+  }
+});
+
+/* hide suggestions when clicking outside */
+document.addEventListener('click', (e) => {
+  if (!document.querySelector('.search-wrap').contains(e.target)) {
+    hideSuggestions();
+  }
+});
+
+/* Fetch suggestions from OpenWeather Geocoding API */
+async function fetchSuggestions(query) {
+  if (!query || query.length < 2) {
+    hideSuggestions();
+    return;
+  }
+  const q = query.trim();
+  if (suggestionsCache.has(q)) {
+    showSuggestions(suggestionsCache.get(q));
+    return;
+  }
+
+  // cancel previous
+  if (fetchController) {
+    try { fetchController.abort(); } catch(e){}
+    fetchController = null;
+  }
+  fetchController = new AbortController();
+  const url = `https://api.openweathermap.org/geo/1.0/direct?q=${encodeURIComponent(q)}&limit=6&appid=${OPENWEATHER_KEY}`;
+
+  try {
+    const res = await fetch(url, { signal: fetchController.signal });
+    const arr = await res.json();
+    // arr is list of {name, lat, lon, country, state?}
+    const suggestions = Array.isArray(arr) ? arr.map(a => ({
+      name: a.name,
+      lat: a.lat,
+      lon: a.lon,
+      country: a.country,
+      state: a.state || ''
+    })) : [];
+    suggestionsCache.set(q, suggestions);
+    showSuggestions(suggestions);
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    console.warn('Suggestion fetch failed', err);
+    hideSuggestions();
+  }
+}
+
+/* debounce the suggestions call so we don't hammer the API */
+const debouncedFetchSuggestions = debounce((value) => {
+  fetchSuggestions(value);
+}, 300);
+
+/* input event: query suggestions */
+cityInput.addEventListener('input', (e) => {
+  const v = e.target.value;
+  if (!v || v.trim().length < 2) {
+    hideSuggestions();
+    return;
+  }
+  debouncedFetchSuggestions(v);
+});
+
+/* when the input loses focus (but not if a suggestion was clicked),
+   we delay hiding slightly to allow click handler to run (mousedown prevented default) */
+cityInput.addEventListener('blur', () => {
+  setTimeout(() => {
+    if (document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('suggestion-item')) {
+      // focusing on suggestion - do not hide
+      return;
+    }
+    hideSuggestions();
+  }, 180);
+});
+
+/* End search prediction logic */
 
 /* Initialize: set default sound states (muted initially off) */
 (function initSound() {
